@@ -1,3 +1,5 @@
+#![feature(universal_impl_trait)]
+
 use std::io::prelude::*;
 
 fn read_all<S: AsRef<std::path::Path>>(path: S) -> String {
@@ -13,12 +15,20 @@ fn main() {
     let content = read_all(fname);
 
     let cluster = ComputingCluster::new(
-        Grid::from(content), Default::default(), CurrierRule::new()
+        Grid::from(&content), Default::default(), CurrierRule::new()
     );
 
     let result = infections(cluster, steps);
 
     println!("infections = {}", result);
+
+    let cluster = ComputingCluster::new(
+        Grid::from(&content), Default::default(), EvolvedRule::new()
+    );
+
+    let result = infections(cluster, steps);
+
+    println!("Evolved infections = {}", result);
 }
 
 type Position = (i32, i32);
@@ -26,13 +36,15 @@ type Position = (i32, i32);
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 enum CellState {
     Clean,
+    Weakened,
     Infected,
+    Flagged,
 }
 
 use CellState::*;
 
 #[derive(Debug)]
-struct Grid(std::collections::HashSet<Position>);
+struct Grid(std::collections::HashMap<Position, CellState>);
 
 impl<S: AsRef<str>> From<S> for Grid {
     fn from(data: S) -> Self {
@@ -44,7 +56,10 @@ impl<S: AsRef<str>> From<S> for Grid {
             lines.iter().enumerate().flat_map(|(r, &l)|
                 l.chars().enumerate()
                     .filter_map(move |(c, cell)|
-                        if cell == '#' {Some((r as i32 - h / 2, c as i32 - w / 2))} else { None })
+                        if cell == '#' {Some(
+                            ((r as i32 - h / 2, c as i32 - w / 2), Infected)
+                        )
+                        } else { None })
             ).collect()
         )
     }
@@ -52,24 +67,30 @@ impl<S: AsRef<str>> From<S> for Grid {
 
 impl Grid {
     fn state(&self, pos: Position) -> CellState {
-        match self.0.contains(&pos) {
-            true => Infected,
-            false => Clean
-        }
+        self.0.get(&pos).cloned().unwrap_or(Clean)
     }
 
     fn clean(&mut self, pos: Position) {
         self.0.remove(&pos);
     }
 
+    fn weak(&mut self, pos: Position) {
+        self.0.insert(pos, Weakened);
+    }
+
     fn infect(&mut self, pos: Position) {
-        self.0.insert(pos);
+        self.0.insert(pos, Infected);
+    }
+
+    fn flag(&mut self, pos: Position) {
+        self.0.insert(pos, Flagged);
     }
 
     fn reverse(&mut self, pos: Position) -> CellState{
-        match self.0.remove(&pos) {
-            true => Infected,
-            false => {self.infect(pos); Clean}
+        match self.state(pos) {
+            Clean => {self.infect(pos); Clean},
+            Infected => {self.clean(pos); Infected},
+            s => s
         }
     }
 }
@@ -146,10 +167,33 @@ impl Policy for CurrierRule {
         match old_state {
             Clean => currier.left(),
             Infected => currier.right(),
+            _ => panic!("Not implemented : this policy cannot work with this kind of states")
         }
         currier.step();
     }
 }
+
+struct EvolvedRule {}
+
+impl EvolvedRule {
+    fn new() -> Self { Self {} }
+}
+
+impl Policy for EvolvedRule {
+    fn apply(&self, grid: &mut Grid, currier: &mut Currier) {
+        let old_state = grid.state(currier.position);
+        let position = currier.position;
+        match old_state {
+            Clean => {currier.left(); grid.weak(position)},
+            Infected => {currier.right(); grid.flag(position)},
+            Weakened => {grid.infect(position)},
+            Flagged => {currier.right();currier.right(); grid.clean(position)},
+        };
+        currier.step();
+    }
+}
+
+
 
 struct ComputingCluster<P: Policy> {
     grid: Grid,
@@ -174,7 +218,7 @@ impl<P: Policy> Iterator for ComputingCluster<P> {
     }
 }
 
-fn infections<P: Policy>(cluster: ComputingCluster<P>, steps: usize) -> usize {
+fn infections(cluster: ComputingCluster<impl Policy>, steps: usize) -> usize {
     cluster.take(steps).filter(|&(_, s)| s == Infected).count()
 }
 
@@ -289,6 +333,64 @@ mod test {
         );
 
         assert_eq!(5587, infections(cluster, 10000))
+
+    }
+
+    #[test]
+    fn evolved_policy() {
+        let mut grid = Grid::from(SIMPLE);
+        let mut currier = Currier::default();
+
+        let policy = EvolvedRule::new();
+
+        // Clean
+        policy.apply(&mut grid, &mut currier);
+
+        assert_eq!(Weakened, grid.state((0,0)));
+        assert_eq!((0, -1), currier.position);
+
+        let mut currier = Currier::default();
+
+        // Weakened
+        policy.apply(&mut grid, &mut currier);
+
+        assert_eq!(Infected, grid.state((0,0)));
+        assert_eq!((-1, 0), currier.position);
+
+        let mut currier = Currier::default();
+
+        // Infected
+        policy.apply(&mut grid, &mut currier);
+
+        assert_eq!(Flagged, grid.state((0,0)));
+        assert_eq!((0, 1), currier.position);
+
+        let mut currier = Currier::default();
+
+        // Flagged
+        policy.apply(&mut grid, &mut currier);
+
+        assert_eq!(Clean, grid.state((0,0)));
+        assert_eq!((1, 0), currier.position);
+    }
+
+    #[test]
+    fn count_infections_evolved_virus() {
+        let cluster = ComputingCluster::new(
+            Grid::from(SIMPLE), Default::default(), EvolvedRule::new()
+        );
+
+        assert_eq!(26, infections(cluster, 100))
+
+    }
+
+    #[test]
+    fn count_infections_evolved_virus_10000000() {
+        let cluster = ComputingCluster::new(
+            Grid::from(SIMPLE), Default::default(), EvolvedRule::new()
+        );
+
+        assert_eq!(2511944, infections(cluster, 10000000))
 
     }
 }
